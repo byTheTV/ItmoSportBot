@@ -1,0 +1,17 @@
+# binaries
+*.exe
+*~
+
+# local secrets and runtime data (never commit)
+config.json
+config.*.local.json
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+pewatch.sqlite
+recurring_templates.json
+.env
+.env.*
+
+# test / optional local configs
+config.test-bot.json

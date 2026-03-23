@@ -1,0 +1,8 @@
+{
+  "building_ids": [273],
+  "telegram": {
+    "bot_token": "REPLACE_WITH_TELEGRAM_BOT_TOKEN",
+    "admin_chat_ids": []
+  },
+  "users": []
+}
