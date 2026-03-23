@@ -3,7 +3,6 @@ package store
 import (
 	"database/sql"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -17,6 +16,7 @@ type User struct {
 	TelegramUsername  string // @username без @
 	DisplayName       string
 	Priority          int
+	MinLeadHours      int // минимум часов до начала пары для автозаписи; 0 = не требовать
 	CreatedAt         time.Time
 	Linked            bool
 }
@@ -85,6 +85,35 @@ func (db *DB) UpdateTelegramUsername(chatID int64, username string) error {
 	return err
 }
 
+// SetMinLeadHours — минимальный запас (часов) до начала занятия; 0 = без ограничения по этому правилу.
+func (db *DB) SetMinLeadHours(chatID int64, hours int) error {
+	if hours < 0 || hours > 720 {
+		return fmt.Errorf("ожидается число часов от 0 до 720")
+	}
+	res, err := db.SQL.Exec(`UPDATE users SET min_lead_hours = ? WHERE telegram_chat_id = ?`, hours, chatID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("пользователь chat_id=%d не найден", chatID)
+	}
+	return nil
+}
+
+// MinLeadHours — сохранённое значение (для /lead без аргументов).
+func (db *DB) MinLeadHours(chatID int64, defaultHours int) (int, error) {
+	var h int
+	err := db.SQL.QueryRow(`SELECT min_lead_hours FROM users WHERE telegram_chat_id = ?`, chatID).Scan(&h)
+	if err == sql.ErrNoRows {
+		return defaultHours, nil
+	}
+	if err != nil {
+		return defaultHours, err
+	}
+	return h, nil
+}
+
 // SetPriority — смена приоритета (меньше = раньше в очереди автозаписи).
 func (db *DB) SetPriority(chatID int64, priority int) error {
 	res, err := db.SQL.Exec(`UPDATE users SET priority = ? WHERE telegram_chat_id = ?`, priority, chatID)
@@ -126,7 +155,7 @@ func (db *DB) HasLinkedITMO(chatID int64) (bool, error) {
 // ListUsersWithTokensOrdered — для воркера: приоритет по возрастанию, затем id; только с непустым токеном.
 func (db *DB) ListUsersWithTokensOrdered() ([]User, error) {
 	rows, err := db.SQL.Query(`
-		SELECT id, telegram_chat_id, COALESCE(telegram_username,''), display_name, priority, created_at
+		SELECT id, telegram_chat_id, COALESCE(telegram_username,''), display_name, priority, min_lead_hours, created_at
 		FROM users
 		WHERE refresh_token_enc IS NOT NULL AND length(refresh_token_enc) > 0
 		ORDER BY priority ASC, id ASC
@@ -140,7 +169,7 @@ func (db *DB) ListUsersWithTokensOrdered() ([]User, error) {
 		var u User
 		var created sql.NullString
 		var dn sql.NullString
-		if err := rows.Scan(&u.ID, &u.TelegramChatID, &u.TelegramUsername, &dn, &u.Priority, &created); err != nil {
+		if err := rows.Scan(&u.ID, &u.TelegramChatID, &u.TelegramUsername, &dn, &u.Priority, &u.MinLeadHours, &created); err != nil {
 			return nil, err
 		}
 		if dn.Valid {
@@ -217,43 +246,3 @@ func (db *DB) ImportFromConfig(users []config.User) error {
 	return nil
 }
 
-// GetRecurringBlob — сырое содержимое как в json-файле.
-func (db *DB) GetRecurringBlob(chatID int64) ([]byte, error) {
-	var raw sql.NullString
-	err := db.SQL.QueryRow(`SELECT templates_json FROM user_recurring WHERE telegram_chat_id = ?`, chatID).Scan(&raw)
-	if err == sql.ErrNoRows {
-		return []byte(`{"templates":[]}`), nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if !raw.Valid || raw.String == "" {
-		return []byte(`{"templates":[]}`), nil
-	}
-	return []byte(raw.String), nil
-}
-
-// SetRecurringBlob сохраняет JSON.
-func (db *DB) SetRecurringBlob(chatID int64, blob []byte) error {
-	_, err := db.SQL.Exec(`
-		INSERT INTO user_recurring (telegram_chat_id, templates_json) VALUES (?, ?)
-		ON CONFLICT(telegram_chat_id) DO UPDATE SET templates_json = excluded.templates_json
-	`, chatID, string(blob))
-	return err
-}
-
-// ImportRecurringFile копирует legacy recurring_templates.json в пользователя chatID.
-func (db *DB) ImportRecurringFile(path string, chatID int64) error {
-	var n int
-	if err := db.SQL.QueryRow(`SELECT length(templates_json) FROM user_recurring WHERE telegram_chat_id = ?`, chatID).Scan(&n); err == nil && n > 20 {
-		return nil
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	return db.SetRecurringBlob(chatID, raw)
-}

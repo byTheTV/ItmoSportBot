@@ -6,8 +6,10 @@ import (
 	"itmosportbot/internal/schedule"
 )
 
-// Fingerprint совпадает со слотом по всем полям, кроме id и мест (см. шаблон).
+// Fingerprint совпадает со слотом по полям расписания; lesson_id не сравнивается.
+// BuildingID: для шаблонов, созданных после добавления поля — корпус из API; 0 = старые шаблоны (корпус не фиксирован).
 type Fingerprint struct {
+	BuildingID      int64  `json:"building_id,omitempty"`
 	Weekday         int    `json:"weekday"` // time.Weekday: 0=вск … 6=сб
 	TimeSlotStart   string `json:"time_slot_start"`
 	TimeSlotEnd     string `json:"time_slot_end"`
@@ -20,6 +22,7 @@ type Fingerprint struct {
 
 func FingerprintFromOccurrence(o schedule.Occurrence) Fingerprint {
 	return Fingerprint{
+		BuildingID:      o.BuildingID,
 		Weekday:         o.Weekday,
 		TimeSlotStart:   o.TimeSlotStart,
 		TimeSlotEnd:     o.TimeSlotEnd,
@@ -32,6 +35,9 @@ func FingerprintFromOccurrence(o schedule.Occurrence) Fingerprint {
 }
 
 func (f Fingerprint) Matches(o schedule.Occurrence) bool {
+	if f.BuildingID != 0 && o.BuildingID != f.BuildingID {
+		return false
+	}
 	if f.Weekday != o.Weekday {
 		return false
 	}
@@ -57,6 +63,14 @@ func (f Fingerprint) Matches(o schedule.Occurrence) bool {
 		return false
 	}
 	return true
+}
+
+// BuildingIDsForSign список building_id для POST записи: один корпус из шаблона, если задан; иначе полный union (как раньше).
+func BuildingIDsForSign(fp Fingerprint, union []int64) []int64 {
+	if fp.BuildingID > 0 {
+		return []int64{fp.BuildingID}
+	}
+	return union
 }
 
 func normSpace(s string) string {

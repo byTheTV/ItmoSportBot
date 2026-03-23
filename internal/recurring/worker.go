@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,15 +15,20 @@ import (
 
 // Worker периодически тянет расписание и для каждого пользователя (по priority) пытается записаться на его шаблоны.
 type Worker struct {
-	DB          *store.DB
-	SharedHTTP  *http.Client
-	TokenURL    string
-	ClientID    string
-	ConfigBids  []int64
-	SignURL     string
-	Interval    time.Duration
-	HorizonDays int
-	OnSuccess   func(lessonID int64, userName string, telegramChatID int64)
+	DB         *store.DB
+	SharedHTTP *http.Client
+	TokenURL   string
+	ClientID   string
+	ConfigBids []int64
+	SignURL    string
+	// PollSlow — интервал между тиками вне окна полуночи (МСК).
+	PollSlow time.Duration
+	// PollFast — интервал в окне recurring_fast_window_* (обычно ~20 с у 00:00 МСК).
+	PollFast        time.Duration
+	FastWindowStart string
+	FastWindowEnd   string
+	HorizonDays     int
+	OnSuccess       func(lessonID int64, userName string, telegramChatID int64)
 
 	mu          sync.Mutex
 	clientCache map[int64]*myitmo.Client
@@ -60,18 +66,39 @@ func (w *Worker) clientFor(u store.User) (*myitmo.Client, error) {
 }
 
 func (w *Worker) Run(ctx context.Context) {
-	if w.Interval <= 0 {
-		w.Interval = 20 * time.Second
+	if w.PollSlow <= 0 {
+		w.PollSlow = 60 * time.Second
+	}
+	if w.PollFast <= 0 {
+		w.PollFast = 20 * time.Second
 	}
 	if w.HorizonDays <= 0 {
-		w.HorizonDays = 42
+		w.HorizonDays = 18
 	}
-	t := time.NewTicker(w.Interval)
-	defer t.Stop()
+	if strings.TrimSpace(w.FastWindowStart) == "" {
+		w.FastWindowStart = "23:50"
+	}
+	if strings.TrimSpace(w.FastWindowEnd) == "" {
+		w.FastWindowEnd = "00:15"
+	}
+	loc := mskLoc()
 	for {
 		w.tick(ctx)
 		select {
 		case <-ctx.Done():
+			return
+		default:
+		}
+		d := NextPollInterval(time.Now().In(loc), w.PollFast, w.PollSlow, w.FastWindowStart, w.FastWindowEnd)
+		if d < 5*time.Second {
+			d = 5 * time.Second
+		}
+		t := time.NewTimer(d)
+		select {
+		case <-ctx.Done():
+			if !t.Stop() {
+				<-t.C
+			}
 			return
 		case <-t.C:
 		}
@@ -89,17 +116,31 @@ func (w *Worker) tick(ctx context.Context) {
 	}
 	tctx, cancel := context.WithTimeout(ctx, 150*time.Second)
 	allBids := schedule.UnionBuildingIDs(w.ConfigBids)
+	var bidMu sync.Mutex
+	var wg sync.WaitGroup
 	for _, u := range users {
-		cli, err := w.clientFor(u)
-		if err != nil || cli == nil {
-			continue
-		}
-		if raw, err := cli.ScheduleFilters(tctx); err != nil {
-			continue
-		} else if fb, err := schedule.ParseFilterBuildingIDs(raw); err == nil && len(fb) > 0 {
+		u := u
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cli, err := w.clientFor(u)
+			if err != nil || cli == nil {
+				return
+			}
+			raw, err := cli.ScheduleFilters(tctx)
+			if err != nil {
+				return
+			}
+			fb, err := schedule.ParseFilterBuildingIDs(raw)
+			if err != nil || len(fb) == 0 {
+				return
+			}
+			bidMu.Lock()
 			allBids = schedule.UnionBuildingIDs(allBids, fb)
-		}
+			bidMu.Unlock()
+		}()
 	}
+	wg.Wait()
 	loc, err := time.LoadLocation("Europe/Moscow")
 	if err != nil {
 		loc = time.FixedZone("MSK", 3*3600)
@@ -136,14 +177,17 @@ func (w *Worker) tick(ctx context.Context) {
 		if err != nil || cli == nil {
 			continue
 		}
-		blob, err := w.DB.GetRecurringBlob(u.TelegramChatID)
+		rows, err := w.DB.ListRecurringTemplates(u.TelegramChatID)
 		if err != nil {
-			log.Printf("recurring: blob %d: %v", u.TelegramChatID, err)
+			log.Printf("recurring: list templates %d: %v", u.TelegramChatID, err)
 			continue
 		}
-		templates, err := DecodeTemplatesFileJSON(blob)
-		if err != nil || len(templates) == 0 {
+		if len(rows) == 0 {
 			continue
+		}
+		templates := make([]Template, len(rows))
+		for i := range rows {
+			templates[i] = TemplateFromStore(rows[i])
 		}
 		for _, tpl := range templates {
 			signedSet := make(map[int64]struct{}, len(tpl.SignedLessonIDs))
@@ -179,23 +223,21 @@ func (w *Worker) tick(ctx context.Context) {
 				if err != nil {
 					continue
 				}
-				if lessonStart.Sub(now) < MinLeadBeforeLesson {
-					continue
+				if u.MinLeadHours > 0 {
+					minLead := time.Duration(u.MinLeadHours) * time.Hour
+					if lessonStart.Sub(now) < minLead {
+						continue
+					}
 				}
-				ok, _, uname := myitmo.TrySignLesson(signCtx, []*myitmo.Client{cli}, w.SignURL, allBids, oc.LessonID)
+				signBids := BuildingIDsForSign(tpl.Fingerprint, allBids)
+				ok, _, uname := myitmo.TrySignLesson(signCtx, []*myitmo.Client{cli}, w.SignURL, signBids, oc.LessonID)
 				if !ok {
 					continue
 				}
-				newBlob, err := AppendSignedToJSON(blob, tpl.ID, oc.LessonID)
-				if err != nil {
-					log.Printf("recurring: AppendSignedToJSON: %v", err)
+				if err := w.DB.AppendSignedLesson(u.TelegramChatID, tpl.ID, oc.LessonID); err != nil {
+					log.Printf("recurring: AppendSignedLesson: %v", err)
 					continue
 				}
-				if err := w.DB.SetRecurringBlob(u.TelegramChatID, newBlob); err != nil {
-					log.Printf("recurring: save blob: %v", err)
-					continue
-				}
-				blob = newBlob
 				signedSet[oc.LessonID] = struct{}{}
 				if w.OnSuccess != nil {
 					w.OnSuccess(oc.LessonID, uname, u.TelegramChatID)

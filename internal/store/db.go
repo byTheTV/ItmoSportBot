@@ -10,7 +10,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// DB — SQLite: пользователи и JSON шаблонов на chat_id.
+// DB — SQLite: пользователи; шаблоны автозаписи в recurring_templates + recurring_signed.
 type DB struct {
 	SQL *sql.DB
 }
@@ -63,15 +63,46 @@ func (db *DB) migrate() error {
 			FOREIGN KEY (telegram_chat_id) REFERENCES users(telegram_chat_id) ON DELETE CASCADE
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_users_priority ON users(priority ASC, id ASC)`,
+		`CREATE TABLE IF NOT EXISTS recurring_templates (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			telegram_chat_id INTEGER NOT NULL,
+			public_id TEXT NOT NULL,
+			source_lesson_id INTEGER NOT NULL DEFAULT 0,
+			building_id INTEGER NOT NULL DEFAULT 0,
+			weekday INTEGER NOT NULL,
+			time_slot_start TEXT NOT NULL,
+			time_slot_end TEXT NOT NULL,
+			section_name TEXT NOT NULL,
+			room_name TEXT NOT NULL,
+			teacher_fio TEXT NOT NULL,
+			type_name TEXT NOT NULL,
+			lesson_level_name TEXT NOT NULL,
+			FOREIGN KEY (telegram_chat_id) REFERENCES users(telegram_chat_id) ON DELETE CASCADE,
+			UNIQUE(telegram_chat_id, public_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_recurring_templates_chat ON recurring_templates(telegram_chat_id)`,
+		`CREATE TABLE IF NOT EXISTS recurring_signed (
+			template_row_id INTEGER NOT NULL REFERENCES recurring_templates(id) ON DELETE CASCADE,
+			lesson_id INTEGER NOT NULL,
+			PRIMARY KEY (template_row_id, lesson_id)
+		)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.SQL.Exec(s); err != nil {
 			return fmt.Errorf("migrate: %w", err)
 		}
 	}
+	if err := migrateRecurringJSONToTables(db); err != nil {
+		return fmt.Errorf("migrate recurring json: %w", err)
+	}
 	if _, err := db.SQL.Exec(`ALTER TABLE users ADD COLUMN telegram_username TEXT`); err != nil {
 		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 			return fmt.Errorf("migrate telegram_username: %w", err)
+		}
+	}
+	if _, err := db.SQL.Exec(`ALTER TABLE users ADD COLUMN min_lead_hours INTEGER NOT NULL DEFAULT 36`); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("migrate min_lead_hours: %w", err)
 		}
 	}
 	return nil

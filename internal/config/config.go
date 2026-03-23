@@ -33,30 +33,39 @@ type User struct {
 }
 
 type App struct {
-	ClientID        string
-	TokenURL        string
-	SignURL         string
-	BuildingIDs     []int64
-	BuildingsSource string // откуда взяли список: config | файл | default
-	TokenKey        string // AES-256: 64 hex или строка ≥32 символа; см. PE_TOKEN_KEY
-	RecurringPoll   time.Duration
-	SQLitePath      string
-	Telegram        Telegram
-	Users           []User
+	ClientID                 string
+	TokenURL                 string
+	SignURL                  string
+	BuildingIDs              []int64
+	BuildingsSource          string // откуда взяли список: config | файл | default
+	TokenKey                 string // AES-256: 64 hex или строка ≥32 символа; см. PE_TOKEN_KEY
+	RecurringPollSlow        time.Duration
+	RecurringPollFast        time.Duration
+	RecurringHorizonDays     int
+	RecurringFastWindowStart string // HH:MM МСК
+	RecurringFastWindowEnd   string
+	SQLitePath               string
+	Telegram                 Telegram
+	Users                    []User
 }
 
 type fileConfig struct {
-	ClientID        string   `json:"client_id"`
-	TokenURL        string   `json:"token_url"`
-	SignURL         string   `json:"sign_url"`
-	BuildingID      int64    `json:"building_id"`
-	BuildingIDs     []int64  `json:"building_ids"`
-	BuildingsFile   string   `json:"buildings_file"`
-	RecurringPollMS int      `json:"recurring_poll_ms"`
-	SQLitePath      string   `json:"sqlite_path"`
-	TokenKey        string   `json:"token_key"`
-	Telegram        Telegram `json:"telegram"`
-	Users           []User   `json:"users"`
+	ClientID                 string   `json:"client_id"`
+	TokenURL                 string   `json:"token_url"`
+	SignURL                  string   `json:"sign_url"`
+	BuildingID               int64    `json:"building_id"`
+	BuildingIDs              []int64  `json:"building_ids"`
+	BuildingsFile            string   `json:"buildings_file"`
+	RecurringPollMS          int      `json:"recurring_poll_ms"` // устар.: интервал «медленного» опроса, если нет recurring_poll_slow_ms
+	RecurringPollSlowMS      int      `json:"recurring_poll_slow_ms"`
+	RecurringFastPollMS      int      `json:"recurring_fast_poll_ms"`
+	RecurringHorizonDays     int      `json:"recurring_horizon_days"`
+	RecurringFastWindowStart string   `json:"recurring_fast_window_start"`
+	RecurringFastWindowEnd   string   `json:"recurring_fast_window_end"`
+	SQLitePath               string   `json:"sqlite_path"`
+	TokenKey                 string   `json:"token_key"`
+	Telegram                 Telegram `json:"telegram"`
+	Users                    []User   `json:"users"`
 }
 
 func LoadFile(path string) (*App, error) {
@@ -92,12 +101,37 @@ func LoadFile(path string) (*App, error) {
 	if signURL == "" {
 		signURL = DefaultSignURL
 	}
-	recMs := f.RecurringPollMS
-	if recMs <= 0 {
-		recMs = 20000
+	slowMs := f.RecurringPollSlowMS
+	if slowMs <= 0 {
+		slowMs = f.RecurringPollMS
 	}
-	if recMs < 5000 {
-		recMs = 5000
+	if slowMs <= 0 {
+		slowMs = 60000
+	}
+	if slowMs < 5000 {
+		slowMs = 5000
+	}
+	fastMs := f.RecurringFastPollMS
+	if fastMs <= 0 {
+		fastMs = 20000
+	}
+	if fastMs < 5000 {
+		fastMs = 5000
+	}
+	horizon := f.RecurringHorizonDays
+	if horizon <= 0 {
+		horizon = 18
+	}
+	if horizon > 120 {
+		horizon = 120
+	}
+	winStart := strings.TrimSpace(f.RecurringFastWindowStart)
+	winEnd := strings.TrimSpace(f.RecurringFastWindowEnd)
+	if winStart == "" {
+		winStart = "23:50"
+	}
+	if winEnd == "" {
+		winEnd = "00:15"
 	}
 	var bids []int64
 	var bsrc string
@@ -122,16 +156,20 @@ func LoadFile(path string) (*App, error) {
 		sqlitePath = ""
 	}
 	return &App{
-		ClientID:        clientID,
-		TokenURL:        tokenURL,
-		SignURL:         signURL,
-		BuildingIDs:     bids,
-		BuildingsSource: bsrc,
-		TokenKey:        strings.TrimSpace(f.TokenKey),
-		RecurringPoll:   time.Duration(recMs) * time.Millisecond,
-		SQLitePath:      sqlitePath,
-		Telegram:        f.Telegram,
-		Users:           f.Users,
+		ClientID:                 clientID,
+		TokenURL:                 tokenURL,
+		SignURL:                  signURL,
+		BuildingIDs:              bids,
+		BuildingsSource:          bsrc,
+		TokenKey:                 strings.TrimSpace(f.TokenKey),
+		RecurringPollSlow:        time.Duration(slowMs) * time.Millisecond,
+		RecurringPollFast:        time.Duration(fastMs) * time.Millisecond,
+		RecurringHorizonDays:     horizon,
+		RecurringFastWindowStart: winStart,
+		RecurringFastWindowEnd:   winEnd,
+		SQLitePath:               sqlitePath,
+		Telegram:                 f.Telegram,
+		Users:                    f.Users,
 	}, nil
 }
 

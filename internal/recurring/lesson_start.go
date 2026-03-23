@@ -9,8 +9,8 @@ import (
 	"itmosportbot/internal/schedule"
 )
 
-// MinLeadBeforeLesson — не записываться, если до начала занятия осталось меньше этого интервала.
-const MinLeadBeforeLesson = 36 * time.Hour
+// DefaultMinLeadHours — значение по умолчанию для новых пользователей (часы до начала пары).
+const DefaultMinLeadHours = 36
 
 // LessonStartMSK — дата из слота + time_slot_start в часовом поясе МСК.
 func LessonStartMSK(o schedule.Occurrence, loc *time.Location) (time.Time, error) {

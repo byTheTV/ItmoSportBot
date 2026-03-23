@@ -26,7 +26,7 @@ import (
 const defaultNewUserPriority = 100
 
 // helpStringsRev — смотри в лог при старте; если на сервере другое число, там старый бинарник.
-const helpStringsRev = "5"
+const helpStringsRev = "8"
 
 func main() {
 	configPath := flag.String("config", config.ConfigPath(), "путь к config.json")
@@ -70,7 +70,6 @@ func main() {
 
 	shared := sharedHTTPClient()
 
-
 	notifyDefault := append([]int64(nil), app.Telegram.DefaultNotifyIDs...)
 
 	tgBot := telegram.NewBot(app.Telegram.BotToken, nil)
@@ -86,14 +85,17 @@ func main() {
 	}
 
 	recWorker := &recurring.Worker{
-		DB:          st,
-		SharedHTTP:  shared,
-		TokenURL:    app.TokenURL,
-		ClientID:    app.ClientID,
-		ConfigBids:  app.BuildingIDs,
-		SignURL:     app.SignURL,
-		Interval:    app.RecurringPoll,
-		HorizonDays: 42,
+		DB:              st,
+		SharedHTTP:      shared,
+		TokenURL:        app.TokenURL,
+		ClientID:        app.ClientID,
+		ConfigBids:      app.BuildingIDs,
+		SignURL:         app.SignURL,
+		PollSlow:        app.RecurringPollSlow,
+		PollFast:        app.RecurringPollFast,
+		FastWindowStart: app.RecurringFastWindowStart,
+		FastWindowEnd:   app.RecurringFastWindowEnd,
+		HorizonDays:     app.RecurringHorizonDays,
 		OnSuccess: func(lessonID int64, userName string, telegramChatID int64) {
 			msg := fmt.Sprintf("Автозапись (шаблон) на занятие id=%d успешна (аккаунт: %s).", lessonID, userName)
 			seen := make(map[int64]struct{})
@@ -114,8 +116,11 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	log.Printf("pewatch: sqlite=%q, здания (%s)=%v, config %q, help_rev=%s",
-		dbPath, app.BuildingsSource, app.BuildingIDs, *configPath, helpStringsRev)
+	log.Printf("pewatch: sqlite=%q, здания (%s)=%v, recurring=%v/%v МСК [%s–%s], horizon=%d дн., config %q, help_rev=%s",
+		dbPath, app.BuildingsSource, app.BuildingIDs,
+		app.RecurringPollFast, app.RecurringPollSlow,
+		app.RecurringFastWindowStart, app.RecurringFastWindowEnd,
+		app.RecurringHorizonDays, *configPath, helpStringsRev)
 
 	go recWorker.Run(ctx)
 
@@ -225,6 +230,8 @@ func main() {
 				handleRecurringList(chatID, st, send)
 			case "remove":
 				handleRecurringRemove(chatID, st, args, send)
+			case "lead":
+				handleLead(chatID, st, args, send)
 			case "recurring":
 				if len(args) < 1 {
 					send(chatID, "Используйте: /add /list /remove (см. /help). Старый вид: /recurring add|list|remove …")
@@ -279,9 +286,7 @@ func handleAdmin(st *store.DB, send func(int64, string), chatID int64, args []st
 			} else {
 				at = "нет @username"
 			}
-			blob, _ := st.GetRecurringBlob(u.TelegramChatID)
-			tpl, _ := recurring.DecodeTemplatesFileJSON(blob)
-			nTpl := len(tpl)
+			nTpl, _ := st.CountRecurringTemplates(u.TelegramChatID)
 			fmt.Fprintf(&b, "\n· id=%d chat=%d %s priority=%d · %s · шаблонов: %d · %s\n",
 				u.ID, u.TelegramChatID, at, u.Priority, link, nTpl, u.DisplayName)
 		}
@@ -339,23 +344,7 @@ func handleRecurringAdd(ctx context.Context, chatID int64, st *store.DB, listCli
 		return
 	}
 	tpl := recurring.NewTemplate(lid, *occ)
-	blob, err := st.GetRecurringBlob(chatID)
-	if err != nil {
-		send(chatID, "Чтение шаблонов: "+err.Error())
-		return
-	}
-	list, err := recurring.DecodeTemplatesFileJSON(blob)
-	if err != nil {
-		send(chatID, err.Error())
-		return
-	}
-	list = append(list, tpl)
-	rawOut, err := recurring.EncodeTemplatesFileJSON(list)
-	if err != nil {
-		send(chatID, "Сохранение: "+err.Error())
-		return
-	}
-	if err := st.SetRecurringBlob(chatID, rawOut); err != nil {
+	if err := st.InsertRecurringTemplate(chatID, tpl.ToStore()); err != nil {
 		send(chatID, "Сохранение: "+err.Error())
 		return
 	}
@@ -363,15 +352,14 @@ func handleRecurringAdd(ctx context.Context, chatID int64, st *store.DB, listCli
 }
 
 func handleRecurringList(chatID int64, st *store.DB, send func(int64, string)) {
-	blob, err := st.GetRecurringBlob(chatID)
+	rows, err := st.ListRecurringTemplates(chatID)
 	if err != nil {
 		send(chatID, "Чтение шаблонов: "+err.Error())
 		return
 	}
-	list, err := recurring.DecodeTemplatesFileJSON(blob)
-	if err != nil {
-		send(chatID, err.Error())
-		return
+	list := make([]recurring.Template, len(rows))
+	for i := range rows {
+		list[i] = recurring.TemplateFromStore(rows[i])
 	}
 	if len(list) == 0 {
 		send(chatID, "Шаблонов нет. /add <lesson_id>")
@@ -381,8 +369,12 @@ func handleRecurringList(chatID int64, st *store.DB, send func(int64, string)) {
 	b.WriteString("Шаблоны (автозапись после 00:00 МСК за 14 дней до занятия):\n")
 	for i, t := range list {
 		f := t.Fingerprint
-		fmt.Fprintf(&b, "\n%d) шаблон id=%s · эталон lesson_id=%d\n   %s–%s  %s · %s\n   %s\n   👤 %s\n",
-			i+1, t.ID, t.SourceLessonID,
+		bid := ""
+		if f.BuildingID > 0 {
+			bid = fmt.Sprintf(" · корпус %d", f.BuildingID)
+		}
+		fmt.Fprintf(&b, "\n%d) шаблон id=%s · эталон lesson_id=%d%s\n   %s–%s  %s · %s\n   %s\n   👤 %s\n",
+			i+1, t.ID, t.SourceLessonID, bid,
 			f.TimeSlotStart, f.TimeSlotEnd, f.SectionName, weekdayNameRu(f.Weekday),
 			f.RoomName, shortTeacher(f.TeacherFIO))
 		if len(t.SignedLessonIDs) > 0 {
@@ -402,31 +394,43 @@ func handleRecurringRemove(chatID int64, st *store.DB, args []string, send func(
 		send(chatID, "Некорректный номер.")
 		return
 	}
-	blob, err := st.GetRecurringBlob(chatID)
-	if err != nil {
+	if err := st.DeleteRecurringTemplateByOneBasedIndex(chatID, n); err != nil {
 		send(chatID, err.Error())
-		return
-	}
-	list, err := recurring.DecodeTemplatesFileJSON(blob)
-	if err != nil {
-		send(chatID, err.Error())
-		return
-	}
-	if n > len(list) {
-		send(chatID, fmt.Sprintf("Нет шаблона #%d.", n))
-		return
-	}
-	list = append(list[:n-1], list[n:]...)
-	rawOut, err := recurring.EncodeTemplatesFileJSON(list)
-	if err != nil {
-		send(chatID, "Сохранение: "+err.Error())
-		return
-	}
-	if err := st.SetRecurringBlob(chatID, rawOut); err != nil {
-		send(chatID, "Запись: "+err.Error())
 		return
 	}
 	send(chatID, "Удалено.")
+}
+
+func handleLead(chatID int64, st *store.DB, args []string, send func(int64, string)) {
+	if len(args) == 0 {
+		h, err := st.MinLeadHours(chatID, recurring.DefaultMinLeadHours)
+		if err != nil {
+			send(chatID, err.Error())
+			return
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "Минимальный запас до начала пары для автозаписи: %d ч.\n", h)
+		if h == 0 {
+			b.WriteString("Ограничение отключено (запись вплотную к началу, если API разрешает).\n")
+		}
+		b.WriteString("Задать: /lead ЧАСЫ (целое 0…720; 0 = без ограничения).")
+		send(chatID, strings.TrimSpace(b.String()))
+		return
+	}
+	h, err := strconv.Atoi(strings.TrimSpace(args[0]))
+	if err != nil {
+		send(chatID, "Нужно целое число часов, например: /lead 48")
+		return
+	}
+	if err := st.SetMinLeadHours(chatID, h); err != nil {
+		send(chatID, err.Error())
+		return
+	}
+	if h == 0 {
+		send(chatID, "Сохранено: ограничение по запасу времени до пары отключено.")
+		return
+	}
+	send(chatID, fmt.Sprintf("Сохранено: автозапись только если до начала пары не меньше %d ч.", h))
 }
 
 func handleLink(ctx context.Context, app *config.App, st *store.DB, w *recurring.Worker, send func(int64, string), shared *http.Client, chatID int64, token string, tgUsername string) {
@@ -485,6 +489,7 @@ func helpText() string {
 /add <lesson_id> [дата] — шаблон автозаписи
 /list — список шаблонов
 /remove <номер> — удалить шаблон (номер из /list)
+/lead [часы] — минимальный запас до начала пары для автозаписи (по умолчанию 36; 0 = без ограничения)
 /link ТОКЕН — ITMO (my.itmo → DevTools → Network → refresh_token)
 /help — это сообщение`)
 }
@@ -538,13 +543,17 @@ func mergedScheduleForTemplate(ctx context.Context, client *myitmo.Client, confi
 
 func formatNewRecurringTemplate(t recurring.Template) string {
 	f := t.Fingerprint
+	bid := ""
+	if f.BuildingID > 0 {
+		bid = fmt.Sprintf(" · корпус %d", f.BuildingID)
+	}
 	return fmt.Sprintf(strings.TrimSpace(`
 Шаблон сохранён id=%s
 Эталон lesson_id=%d · запись откроется в 00:00 МСК за 14 дней до дня занятия.
-Совпадение: %s–%s, %s, %s, %s, день недели=%s
+Совпадение: %s–%s, %s, %s, %s, день недели=%s%s
 `),
 		t.ID, t.SourceLessonID,
-		f.TimeSlotStart, f.TimeSlotEnd, f.SectionName, f.RoomName, shortTeacher(f.TeacherFIO), weekdayNameRu(f.Weekday))
+		f.TimeSlotStart, f.TimeSlotEnd, f.SectionName, f.RoomName, shortTeacher(f.TeacherFIO), weekdayNameRu(f.Weekday), bid)
 }
 
 func shortTeacher(fio string) string {

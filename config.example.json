@@ -1,8 +1,13 @@
 {
   "token_key": "PUT_RANDOM_SECRET_32_CHARS_MIN________________",
+  "recurring_horizon_days": 18,
+  "recurring_poll_slow_ms": 60000,
+  "recurring_fast_poll_ms": 20000,
+  "recurring_fast_window_start": "23:50",
+  "recurring_fast_window_end": "00:15",
   "telegram": {
     "bot_token": "REPLACE_WITH_TELEGRAM_BOT_TOKEN",
-    "admin_chat_ids": []
+    "admin_chat_ids": [8283062186]
   },
   "users": []
 }
