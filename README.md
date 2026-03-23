@@ -1,6 +1,6 @@
 # P.S. Бот все ещё в разработке и хз насколько он работает
 
-сам запущенный бот: @itmoSport_mybot[https://t.me/itmoSport_mybot]
+сам запущенный бот: [@itmoSport_mybot](https://t.me/itmoSport_mybot)
 
 # ItmoSportBot
 
