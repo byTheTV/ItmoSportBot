@@ -6,12 +6,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
 )
 
 const api = "https://api.telegram.org"
+
+func truncateForLog(b []byte, max int) string {
+	if len(b) <= max {
+		return string(b)
+	}
+	return string(b[:max]) + "…"
+}
 
 type Bot struct {
 	token  string
@@ -111,8 +119,9 @@ func (b *Bot) PollUpdates(ctx context.Context, onMessage func(Incoming)) error {
 		respBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		var wrap struct {
-			Ok     bool `json:"ok"`
-			Result []struct {
+			Ok          bool   `json:"ok"`
+			Description string `json:"description"`
+			Result      []struct {
 				UpdateID int64 `json:"update_id"`
 				Message  *struct {
 					Chat struct {
@@ -125,7 +134,13 @@ func (b *Bot) PollUpdates(ctx context.Context, onMessage func(Incoming)) error {
 				} `json:"message"`
 			} `json:"result"`
 		}
-		if json.Unmarshal(respBody, &wrap) != nil || !wrap.Ok {
+		if err := json.Unmarshal(respBody, &wrap); err != nil {
+			log.Printf("telegram getUpdates: parse JSON: %v; body=%q", err, truncateForLog(respBody, 500))
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		if !wrap.Ok {
+			log.Printf("telegram getUpdates: ok=false status=%s desc=%q body=%q", resp.Status, wrap.Description, truncateForLog(respBody, 500))
 			time.Sleep(2 * time.Second)
 			continue
 		}
