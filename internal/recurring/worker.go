@@ -20,7 +20,6 @@ type Worker struct {
 	ClientID    string
 	ConfigBids  []int64
 	SignURL     string
-	SignBids    []int64
 	Interval    time.Duration
 	HorizonDays int
 	OnSuccess   func(lessonID int64, userName string, telegramChatID int64)
@@ -88,15 +87,17 @@ func (w *Worker) tick(ctx context.Context) {
 	if len(users) == 0 {
 		return
 	}
-	listClient, err := w.clientFor(users[0])
-	if err != nil || listClient == nil {
-		return
-	}
 	tctx, cancel := context.WithTimeout(ctx, 150*time.Second)
 	allBids := schedule.UnionBuildingIDs(w.ConfigBids)
-	if raw, err := listClient.ScheduleFilters(tctx); err == nil {
-		if fb, err := schedule.ParseFilterBuildingIDs(raw); err == nil && len(fb) > 0 {
-			allBids = schedule.UnionBuildingIDs(w.ConfigBids, fb)
+	for _, u := range users {
+		cli, err := w.clientFor(u)
+		if err != nil || cli == nil {
+			continue
+		}
+		if raw, err := cli.ScheduleFilters(tctx); err != nil {
+			continue
+		} else if fb, err := schedule.ParseFilterBuildingIDs(raw); err == nil && len(fb) > 0 {
+			allBids = schedule.UnionBuildingIDs(allBids, fb)
 		}
 	}
 	loc, err := time.LoadLocation("Europe/Moscow")
@@ -106,6 +107,11 @@ func (w *Worker) tick(ctx context.Context) {
 	now := time.Now().In(loc)
 	start := now.Format("2006-01-02")
 	end := now.AddDate(0, 0, w.HorizonDays).Format("2006-01-02")
+	listClient, err := w.clientFor(users[0])
+	if err != nil || listClient == nil {
+		cancel()
+		return
+	}
 	parts, _ := schedule.FetchBuildingSchedulesRange(tctx, listClient, start, end, allBids, 10)
 	cancel()
 	if len(parts) == 0 {
@@ -176,7 +182,7 @@ func (w *Worker) tick(ctx context.Context) {
 				if lessonStart.Sub(now) < MinLeadBeforeLesson {
 					continue
 				}
-				ok, _, uname := myitmo.TrySignLesson(signCtx, []*myitmo.Client{cli}, w.SignURL, w.SignBids, oc.LessonID)
+				ok, _, uname := myitmo.TrySignLesson(signCtx, []*myitmo.Client{cli}, w.SignURL, allBids, oc.LessonID)
 				if !ok {
 					continue
 				}

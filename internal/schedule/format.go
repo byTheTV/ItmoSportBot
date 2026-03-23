@@ -26,9 +26,9 @@ func joinBuildingIDs(ids []int64) string {
 	return b.String()
 }
 
-// FormatDayMessages — заголовок (все корпуса из config) + блоки по корпусам со слотами.
+// FormatDayMessages — заголовок (базовый список зданий) + блоки по корпусам со слотами.
 // loadFailed — building_id, по которым API вернул ошибку (не путать с «на дату пусто»).
-// mergedFilterBuildings — если true, в опрос входили все building_id из GET sign/schedule/filters (union с config); totalPolled — число уникальных id.
+// mergedFilterBuildings — если true, в опрос входили все building_id из GET sign/schedule/filters (union с базовым списком); totalPolled — число уникальных id.
 func FormatDayMessages(date string, scheduleJSON, limitsJSON []byte, requestedBuildings, loadFailed []int64, mergedFilterBuildings bool, totalPolled int) ([]string, error) {
 	var sched struct {
 		Result []struct {
@@ -55,7 +55,7 @@ func FormatDayMessages(date string, scheduleJSON, limitsJSON []byte, requestedBu
 		if len(requestedBuildings) > 0 {
 			line += fmt.Sprintf("\nЗапрошены корпуса: %s", joinBuildingIDs(requestedBuildings))
 		} else {
-			line += " Проверь дату и building_ids в config."
+			line += " Проверь дату и список зданий (buildings.json или building_ids в config)."
 		}
 		if len(loadFailed) > 0 {
 			line += fmt.Sprintf("\nОшибка API при загрузке: %s", joinBuildingIDs(loadFailed))
@@ -87,10 +87,10 @@ func FormatDayMessages(date string, scheduleJSON, limitsJSON []byte, requestedBu
 	var head strings.Builder
 	fmt.Fprintf(&head, "📅 %s", date)
 	if len(requestedBuildings) > 0 {
-		fmt.Fprintf(&head, "\nКорпуса из config (%d): %s", len(requestedBuildings), joinBuildingIDs(requestedBuildings))
+		fmt.Fprintf(&head, "\nБазовый список корпусов (%d): %s", len(requestedBuildings), joinBuildingIDs(requestedBuildings))
 	}
 	if mergedFilterBuildings && totalPolled > 0 {
-		fmt.Fprintf(&head, "\nОпрос расписания: %d уникальных building_id (config ∪ API filters)", totalPolled)
+		fmt.Fprintf(&head, "\nОпрос расписания: %d уникальных building_id (базовый список ∪ API filters)", totalPolled)
 	}
 	if len(loadFailed) > 0 {
 		fmt.Fprintf(&head, "\nНе загрузилось (ошибка API): %s", joinBuildingIDs(loadFailed))

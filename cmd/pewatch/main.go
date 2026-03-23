@@ -40,8 +40,9 @@ func main() {
 		log.Printf("предупреждение: telegram.admin_chat_ids пуст — команда /admin никому недоступна")
 	}
 
-	if os.Getenv("PE_TOKEN_KEY") == "" {
-		log.Printf("предупреждение: PE_TOKEN_KEY не задан — refresh-токены в SQLite хранятся без шифрования (префикс PLAIN1:). Задайте 32+ символа или 64 hex.")
+	store.SetTokenKey(app.TokenKey)
+	if !store.TokenEncryptionConfigured() {
+		log.Printf("предупреждение: ни PE_TOKEN_KEY, ни token_key в config — refresh-токены в SQLite без шифрования (префикс PLAIN1:). Задайте 64 hex (openssl rand -hex 32) или строку от 32 символов; в env приоритетнее config.")
 	}
 
 	dbPath := sqliteDBPath(*configPath, app.SQLitePath)
@@ -69,26 +70,6 @@ func main() {
 
 	shared := sharedHTTPClient()
 
-	bctx, bcancel := context.WithTimeout(context.Background(), 25*time.Second)
-	signBuildingIDs := app.BuildingIDs
-	users0, _ := st.ListUsersWithTokensOrdered()
-	if len(users0) > 0 {
-		u := users0[0]
-		listClient, err := clientForStore(st, u, app, shared)
-		if err == nil && listClient != nil {
-			if fraw, err := listClient.ScheduleFilters(bctx); err != nil {
-				log.Printf("startup GET sign/schedule/filters: %v — для записи только building_ids из config", err)
-			} else if fb, err := schedule.ParseFilterBuildingIDs(fraw); err != nil {
-				log.Printf("parse schedule filters: %v", err)
-			} else {
-				signBuildingIDs = schedule.UnionBuildingIDs(app.BuildingIDs, fb)
-				log.Printf("запись (recurring): перебор %d building_id (config ∪ filters API)", len(signBuildingIDs))
-			}
-		}
-	} else {
-		log.Printf("нет пользователей с токеном в БД — filters API пропущен, building_ids только из config")
-	}
-	bcancel()
 
 	notifyDefault := append([]int64(nil), app.Telegram.DefaultNotifyIDs...)
 
@@ -111,7 +92,6 @@ func main() {
 		ClientID:    app.ClientID,
 		ConfigBids:  app.BuildingIDs,
 		SignURL:     app.SignURL,
-		SignBids:    signBuildingIDs,
 		Interval:    app.RecurringPoll,
 		HorizonDays: 42,
 		OnSuccess: func(lessonID int64, userName string, telegramChatID int64) {
@@ -134,8 +114,8 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	log.Printf("pewatch: sqlite=%q, config building_ids=%v, запись %d building_id, config %q, help_rev=%s",
-		dbPath, app.BuildingIDs, len(signBuildingIDs), *configPath, helpStringsRev)
+	log.Printf("pewatch: sqlite=%q, здания (%s)=%v, config %q, help_rev=%s",
+		dbPath, app.BuildingsSource, app.BuildingIDs, *configPath, helpStringsRev)
 
 	go recWorker.Run(ctx)
 

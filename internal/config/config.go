@@ -4,8 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"time"
+
+	"itmosportbot/internal/buildings"
 )
 
 const (
@@ -29,14 +33,16 @@ type User struct {
 }
 
 type App struct {
-	ClientID      string
-	TokenURL      string
-	SignURL       string
-	BuildingIDs   []int64
-	RecurringPoll time.Duration
-	SQLitePath    string
-	Telegram      Telegram
-	Users         []User
+	ClientID        string
+	TokenURL        string
+	SignURL         string
+	BuildingIDs     []int64
+	BuildingsSource string // откуда взяли список: config | файл | default
+	TokenKey        string // AES-256: 64 hex или строка ≥32 символа; см. PE_TOKEN_KEY
+	RecurringPoll   time.Duration
+	SQLitePath      string
+	Telegram        Telegram
+	Users           []User
 }
 
 type fileConfig struct {
@@ -45,8 +51,10 @@ type fileConfig struct {
 	SignURL         string   `json:"sign_url"`
 	BuildingID      int64    `json:"building_id"`
 	BuildingIDs     []int64  `json:"building_ids"`
+	BuildingsFile   string   `json:"buildings_file"`
 	RecurringPollMS int      `json:"recurring_poll_ms"`
 	SQLitePath      string   `json:"sqlite_path"`
+	TokenKey        string   `json:"token_key"`
 	Telegram        Telegram `json:"telegram"`
 	Users           []User   `json:"users"`
 }
@@ -92,27 +100,56 @@ func LoadFile(path string) (*App, error) {
 		recMs = 5000
 	}
 	var bids []int64
+	var bsrc string
 	if len(f.BuildingIDs) > 0 {
 		bids = append(bids, f.BuildingIDs...)
+		bsrc = "config:building_ids"
 	} else if f.BuildingID > 0 {
 		bids = []int64{f.BuildingID}
+		bsrc = "config:building_id"
 	} else {
-		bids = []int64{DefaultBuildingID}
+		bp := resolveBuildingsPath(path, f.BuildingsFile)
+		if loaded, err := buildings.Load(bp); err == nil {
+			bids = loaded
+			bsrc = bp
+		} else {
+			bids = []int64{DefaultBuildingID}
+			bsrc = "default(273)"
+		}
 	}
 	sqlitePath := f.SQLitePath
 	if sqlitePath == "" {
 		sqlitePath = ""
 	}
 	return &App{
-		ClientID:      clientID,
-		TokenURL:      tokenURL,
-		SignURL:       signURL,
-		BuildingIDs:   bids,
-		RecurringPoll: time.Duration(recMs) * time.Millisecond,
-		SQLitePath:    sqlitePath,
-		Telegram:      f.Telegram,
-		Users:         f.Users,
+		ClientID:        clientID,
+		TokenURL:        tokenURL,
+		SignURL:         signURL,
+		BuildingIDs:     bids,
+		BuildingsSource: bsrc,
+		TokenKey:        strings.TrimSpace(f.TokenKey),
+		RecurringPoll:   time.Duration(recMs) * time.Millisecond,
+		SQLitePath:      sqlitePath,
+		Telegram:        f.Telegram,
+		Users:           f.Users,
 	}, nil
+}
+
+func resolveBuildingsPath(configPath, fromJSON string) string {
+	if p := os.Getenv("PE_BUILDINGS"); p != "" {
+		return filepath.Clean(p)
+	}
+	dir := filepath.Dir(configPath)
+	if dir == "" {
+		dir = "."
+	}
+	if fromJSON != "" {
+		if filepath.IsAbs(fromJSON) {
+			return filepath.Clean(fromJSON)
+		}
+		return filepath.Clean(filepath.Join(dir, fromJSON))
+	}
+	return filepath.Clean(filepath.Join(dir, "buildings.json"))
 }
 
 func ConfigPath() string {

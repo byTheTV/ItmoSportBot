@@ -8,12 +8,31 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
 )
 
 const plainPrefix = "PLAIN1:"
 
+// configTokenKey задаётся из config.json (поле token_key); пусто — не используется.
+var configTokenKey string
+
+// SetTokenKey извлекает ключ из конфига до store.Open. Переменная окружения PE_TOKEN_KEY
+// имеет приоритет над этим значением.
+func SetTokenKey(s string) {
+	configTokenKey = strings.TrimSpace(s)
+}
+
+// TokenEncryptionConfigured — true, если задан валидный PE_TOKEN_KEY или token_key в конфиге.
+func TokenEncryptionConfigured() bool {
+	_, ok := tokenKey()
+	return ok
+}
+
 func tokenKey() ([]byte, bool) {
-	h := os.Getenv("PE_TOKEN_KEY")
+	h := strings.TrimSpace(os.Getenv("PE_TOKEN_KEY"))
+	if h == "" {
+		h = configTokenKey
+	}
 	if len(h) == 64 {
 		b, err := hex.DecodeString(h)
 		if err == nil && len(b) == 32 {

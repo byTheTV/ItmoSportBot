@@ -9,10 +9,12 @@
    copy config.example.json config.json
    ```
    В **`config.json`** (файл в `.gitignore`, в git не попадает) укажи:
+   - **`token_key`** — секрет для AES-шифрования refresh-токенов в SQLite: **64 hex** (например `openssl rand -hex 32`) или **любая строка от 32 символов**. В примере — заглушка: **замени на свой** случайный ключ. Альтернатива: переменная окружения **`PE_TOKEN_KEY`** (имеет приоритет над полем в файле).
    - **`telegram.bot_token`** — у [@BotFather](https://t.me/BotFather);
    - **`telegram.admin_chat_ids`** — числовые id чатов в Telegram, кому доступна `/admin` (свой id можно узнать у ботов вроде @userinfobot);
-   - **`building_ids`** — id корпусов из DevTools → Network → `sign/schedule` (можно несколько);
    - опционально **`users[]`** — для одноразового импорта в SQLite при первом запуске (см. код `ImportFromConfig`); иначе оставь **`"users": []`** — пользователи добавятся через **`/link`** в боте.
+
+   **Здания (корпуса)** — не секрет, в репозитории **`buildings.json`**. Список можно переопределить **`PE_BUILDINGS`**, полем **`buildings_file`** или **`building_ids`** / **`building_id`** в **`config.json`**.
 
 2. Сборка и запуск:
    ```powershell

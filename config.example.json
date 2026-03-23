@@ -1,5 +1,5 @@
 {
-  "building_ids": [273],
+  "token_key": "PUT_RANDOM_SECRET_32_CHARS_MIN________________",
   "telegram": {
     "bot_token": "REPLACE_WITH_TELEGRAM_BOT_TOKEN",
     "admin_chat_ids": []
