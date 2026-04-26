@@ -111,6 +111,18 @@ func main() {
 				send(id, msg)
 			}
 		},
+		OnTokenExpired: func(telegramChatID int64, userName string, details string) {
+			msg := "Не удалось обновить токен ITMO для автозаписи. " +
+				"Нужно заново привязать аккаунт: /link <refresh_token>. " +
+				"Это уведомление отправляется один раз до успешной авторизации."
+			if details != "" {
+				msg += "\nДиагностика: " + truncateForMessage(details, 260)
+			}
+			if telegramChatID != 0 {
+				send(telegramChatID, msg)
+			}
+			log.Printf("recurring: token expired chat=%d user=%s: %s", telegramChatID, userName, details)
+		},
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -153,7 +165,7 @@ func main() {
 					send(chatID, helpText())
 				case "link":
 					if len(args) < 1 {
-						send(chatID, "Использование: /link <refresh_token>\nОдин пробел после /link, затем токен из DevTools → Network (id.itmo.ru, поле refresh_token). Подробнее: /help")
+						send(chatID, "Использование: /link <refresh_token>\nОдин пробел после /link, затем токен из DevTools -> Network (my.itmo.ru, заголовки set-cookie auth._refresh_token.itmoId= - это он и есть)")
 						return
 					}
 					token := strings.TrimSpace(args[0])
@@ -562,6 +574,14 @@ func shortTeacher(fio string) string {
 		return fio[:i]
 	}
 	return fio
+}
+
+func truncateForMessage(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	return s[:max] + "…"
 }
 
 func weekdayNameRu(wd int) string {

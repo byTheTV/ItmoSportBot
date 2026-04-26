@@ -29,9 +29,12 @@ type Worker struct {
 	FastWindowEnd   string
 	HorizonDays     int
 	OnSuccess       func(lessonID int64, userName string, telegramChatID int64)
+	// OnTokenExpired вызывается один раз на пользователя при явной auth-ошибке token/refresh.
+	OnTokenExpired func(telegramChatID int64, userName string, details string)
 
 	mu          sync.Mutex
 	clientCache map[int64]*myitmo.Client
+	tokenAlert  map[int64]struct{}
 }
 
 func (w *Worker) InvalidateClient(chatID int64) {
@@ -63,6 +66,53 @@ func (w *Worker) clientFor(u store.User) (*myitmo.Client, error) {
 	c := myitmo.NewClient(name, w.TokenURL, w.ClientID, tok, w.SharedHTTP)
 	w.clientCache[u.TelegramChatID] = c
 	return c, nil
+}
+
+func isTokenAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	if strings.Contains(s, "invalid_grant") || strings.Contains(s, "invalid_token") {
+		return true
+	}
+	if strings.Contains(s, "unauthorized") || strings.Contains(s, "401") || strings.Contains(s, "403") {
+		return true
+	}
+	// Ошибка рефреша обычно приходит из token endpoint.
+	return strings.Contains(s, "refresh_token") && strings.Contains(s, "token")
+}
+
+func (w *Worker) noteTokenAuthFailure(u store.User, err error) {
+	if !isTokenAuthError(err) {
+		return
+	}
+	w.mu.Lock()
+	if w.tokenAlert == nil {
+		w.tokenAlert = make(map[int64]struct{})
+	}
+	if _, ok := w.tokenAlert[u.TelegramChatID]; ok {
+		w.mu.Unlock()
+		return
+	}
+	w.tokenAlert[u.TelegramChatID] = struct{}{}
+	w.mu.Unlock()
+
+	if w.OnTokenExpired != nil {
+		name := u.DisplayName
+		if name == "" {
+			name = "tg"
+		}
+		w.OnTokenExpired(u.TelegramChatID, name, err.Error())
+	}
+}
+
+func (w *Worker) clearTokenAuthFailure(chatID int64) {
+	w.mu.Lock()
+	if w.tokenAlert != nil {
+		delete(w.tokenAlert, chatID)
+	}
+	w.mu.Unlock()
 }
 
 func (w *Worker) Run(ctx context.Context) {
@@ -129,8 +179,10 @@ func (w *Worker) tick(ctx context.Context) {
 			}
 			raw, err := cli.ScheduleFilters(tctx)
 			if err != nil {
+				w.noteTokenAuthFailure(u, err)
 				return
 			}
+			w.clearTokenAuthFailure(u.TelegramChatID)
 			fb, err := schedule.ParseFilterBuildingIDs(raw)
 			if err != nil || len(fb) == 0 {
 				return
@@ -148,16 +200,34 @@ func (w *Worker) tick(ctx context.Context) {
 	now := time.Now().In(loc)
 	start := now.Format("2006-01-02")
 	end := now.AddDate(0, 0, w.HorizonDays).Format("2006-01-02")
-	listClient, err := w.clientFor(users[0])
-	if err != nil || listClient == nil {
-		cancel()
-		return
+	var parts []schedule.BuildingPart
+	var failed []int64
+	var fetchedBy int64
+	for _, u := range users {
+		listClient, err := w.clientFor(u)
+		if err != nil || listClient == nil {
+			continue
+		}
+		if err := listClient.EnsureAccessToken(tctx); err != nil {
+			w.noteTokenAuthFailure(u, err)
+			continue
+		}
+		w.clearTokenAuthFailure(u.TelegramChatID)
+		p, f := schedule.FetchBuildingSchedulesRange(tctx, listClient, start, end, allBids, 10)
+		if len(p) == 0 {
+			failed = f
+			continue
+		}
+		parts = p
+		fetchedBy = u.TelegramChatID
+		break
 	}
-	parts, _ := schedule.FetchBuildingSchedulesRange(tctx, listClient, start, end, allBids, 10)
 	cancel()
 	if len(parts) == 0 {
+		log.Printf("recurring: schedules range %s..%s не загрузились ни для одного пользователя (bids=%d, failed=%v)", start, end, len(allBids), failed)
 		return
 	}
+	log.Printf("recurring: расписание загружено через chat_id=%d, корпусов=%d", fetchedBy, len(allBids))
 	raw, err := schedule.MergeSchedules(parts)
 	if err != nil {
 		log.Printf("recurring: merge: %v", err)
@@ -177,6 +247,11 @@ func (w *Worker) tick(ctx context.Context) {
 		if err != nil || cli == nil {
 			continue
 		}
+		if err := cli.EnsureAccessToken(signCtx); err != nil {
+			w.noteTokenAuthFailure(u, err)
+			continue
+		}
+		w.clearTokenAuthFailure(u.TelegramChatID)
 		rows, err := w.DB.ListRecurringTemplates(u.TelegramChatID)
 		if err != nil {
 			log.Printf("recurring: list templates %d: %v", u.TelegramChatID, err)

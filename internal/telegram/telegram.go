@@ -155,7 +155,7 @@ func (b *Bot) PollUpdates(ctx context.Context, onMessage func(Incoming)) error {
 			if up.Message.From != nil {
 				un = up.Message.From.Username
 			}
-			onMessage(Incoming{
+			go onMessage(Incoming{
 				ChatID:   up.Message.Chat.ID,
 				Text:     strings.TrimSpace(up.Message.Text),
 				Username: un,
