@@ -502,7 +502,7 @@ func helpText() string {
 /list — список шаблонов
 /remove <номер> — удалить шаблон (номер из /list)
 /lead [часы] — минимальный запас до начала пары для автозаписи (по умолчанию 36; 0 = без ограничения)
-/link ТОКЕН — ITMO (my.itmo → DevTools → Network → refresh_token)
+/link resfresh-ТОКЕН — ITMO  DevTools -> Network (my.itmo.ru, заголовки set-cookie auth._refresh_token.itmoId= - это он и есть)
 /help — это сообщение`)
 }
 
